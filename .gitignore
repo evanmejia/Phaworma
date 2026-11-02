@@ -1,0 +1,12 @@
+# I never commit my local PocketBase data dir — pb_data/ holds my SQLite
+# database, uploaded files, and the TLS cache, and none of it should leave
+# the box.
+/pb_data/
+
+# Compiled binary of my single-binary deployment.
+/forms-saas
+
+# Go build artifacts in general.
+*.exe
+*.test
+*.out
