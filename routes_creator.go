@@ -16,7 +16,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,6 +28,33 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/router"
 )
+
+// My form quotas (audit #5). Each form mints a real SQLite table, and
+// signup is open, so without caps one bot account could mint unbounded
+// tables. I cap ACTIVE forms: an expired form keeps no table (the purge
+// dropped it) and costs nothing while it sits around answering 410 Gone,
+// so it doesn't count against either cap. The global cap also bounds my
+// boot reconciliation walk. Env overrides follow my FORMS_PURGE_CRON
+// pattern so I can exercise the refusal paths with tiny caps.
+var (
+	maxActiveFormsPerUser = envInt("FORMS_MAX_PER_USER", 10)
+	maxActiveFormsTotal   = envInt("FORMS_MAX_TOTAL", 1000)
+)
+
+// envInt reads my optional integer env overrides. A missing or invalid
+// value falls back to my default — a typo in the environment must not
+// break boot or silently zero my caps.
+func envInt(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 1 {
+		return fallback
+	}
+	return v
+}
 
 func registerCreatorRoutes(r *router.Router[*core.RequestEvent]) {
 	// BindFunc attaches requireUser as GROUP middleware: PocketBase's
@@ -242,6 +271,33 @@ func handleCreateForm(e *core.RequestEvent) error {
 		return e.BadRequestError(err.Error(), nil)
 	}
 	canonicalizeQuestionIds(&req.Schema)
+
+	// Enforce my quotas BEFORE anything is allocated (audit #5). Both
+	// refusals are 409s with a human message — my SPA renders err.message
+	// verbatim in the builder's error line, so no frontend change is
+	// needed. (A concurrent create can still overshoot by one: the check
+	// is insurance, not a transaction.) NOTE: dbx.NewExp is RAW SQL, not
+	// my filter language — AND, not &&.
+	ownActive, err := e.App.CountRecords(formsCollectionName,
+		dbx.NewExp("owner = {:uid} AND status = 'active'", dbx.Params{"uid": viewer.Id}))
+	if err != nil {
+		e.App.Logger().Error("failed to count owned forms", "error", err)
+		return e.InternalServerError("failed to check your form quota", nil)
+	}
+	if ownActive >= int64(maxActiveFormsPerUser) {
+		return e.Error(http.StatusConflict,
+			fmt.Sprintf("you already have %d active forms — the limit is %d; delete one to make room",
+				ownActive, maxActiveFormsPerUser), nil)
+	}
+	totalActive, err := e.App.CountRecords(formsCollectionName, dbx.NewExp("status = 'active'"))
+	if err != nil {
+		e.App.Logger().Error("failed to count all active forms", "error", err)
+		return e.InternalServerError("failed to check the form quota", nil)
+	}
+	if totalActive >= int64(maxActiveFormsTotal) {
+		return e.Error(http.StatusConflict,
+			"this server has reached its active-form limit — try again later", nil)
+	}
 
 	code, err := generateShortCode(e.App)
 	if err != nil {
