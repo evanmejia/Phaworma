@@ -10,6 +10,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/hook"
 	"github.com/pocketbase/pocketbase/tools/osutils"
+	"github.com/pocketbase/pocketbase/tools/router"
 )
 
 func main() {
@@ -55,10 +57,14 @@ func main() {
 			if err := be.Next(); err != nil {
 				return err
 			}
-			// Security settings before anything else: my per-IP
-			// defenses are meaningless until client IPs resolve to the
-			// REAL client behind NPM.
+			// Security settings before anything else: my per-IP defenses
+			// (rate limiting) are meaningless until client IPs resolve to
+			// the REAL client behind NPM, so the trusted-proxy header
+			// lands first and the limiter second.
 			if err := assertTrustedProxySettings(be.App); err != nil {
+				return err
+			}
+			if err := assertRateLimitSettings(be.App); err != nil {
 				return err
 			}
 			// The order here is dependency-driven: users first (the forms
@@ -145,6 +151,26 @@ func main() {
 	app.OnServe().Bind(&hook.Handler[*core.ServeEvent]{
 		Id: "customRoutesAndStatic",
 		Func: func(se *core.ServeEvent) error {
+			// PocketBase's rate limiter answers 429 with its own terse
+			// "Too Many Requests." — I rewrite it into something my
+			// respondents can act on. I sit just OUTSIDE the limiter
+			// (priority -1010 vs its -1000), inside the panic recoverer,
+			// so I see its error before it becomes a response.
+			se.Router.Bind(&hook.Handler[*core.RequestEvent]{
+				Id:       "friendlyRateLimitErrors",
+				Priority: -1010,
+				Func: func(e *core.RequestEvent) error {
+					err := e.Next()
+					var apiErr *router.ApiError
+					if errors.As(err, &apiErr) &&
+						apiErr.Status == http.StatusTooManyRequests {
+						return e.TooManyRequestsError(
+							"too many requests — wait a moment and try again", nil)
+					}
+					return err
+				},
+			})
+
 			registerPublicRoutes(se.Router)
 			registerCreatorRoutes(se.Router)
 
@@ -191,9 +217,9 @@ func main() {
 	// Trust boundary: since I trust X-Forwarded-For (see
 	// assertTrustedProxySettings), 8090 must be reachable ONLY by NPM —
 	// anything else on the Proxmox bridge that can hit the port directly
-	// can pick its own client IP (log IP, and any per-IP defense). An
-	// nftables rule on the LXC restricting 8090 to 192.168.40.40 makes
-	// that honest.
+	// can also pick its own rate-limit bucket and log IP. An nftables
+	// rule on the LXC restricting 8090 to 192.168.40.40 makes that
+	// honest.
 	if err := app.Start(); err != nil {
 		log.Fatal(err)
 	}
@@ -236,4 +262,61 @@ func assertTrustedProxySettings(app core.App) error {
 	}
 	app.Logger().Info("enabled X-Forwarded-For as the trusted client-IP header")
 	return nil
+}
+
+// myRateLimitRules are the per-real-IP caps on my two public,
+// password-gated surfaces (audit #1): a known short code must not be
+// brute-forceable at network speed. 10 requests per 5 seconds is
+// generous for a human unlocking a form and submitting it, and a wrong
+// password is indistinguishable from a missing one, so a legitimate
+// respondent only ever sees a 429 if they're hammering.
+//
+// Both labels are PREFIX labels: "POST /api/v1/forms/" covers my
+// submissions endpoint AND creator form-creation (a bot minting forms is
+// throttled too). These rules depend on assertTrustedProxySettings —
+// without it every IP collapses into NPM's one bucket and the caps
+// become a global outage timer.
+var myRateLimitRules = []core.RateLimitRule{
+	{Label: "GET /api/v1/public/forms/", MaxRequests: 10, Duration: 5},
+	{Label: "POST /api/v1/forms/", MaxRequests: 10, Duration: 5},
+}
+
+// assertRateLimitSettings turns on PocketBase's built-in rate limiter
+// (disabled by default in v0.40) with my rules prepended. Prepending
+// matters: label matching walks the rule list in order, so my specific
+// prefix labels must beat the stock "/api/" catch-all.
+//
+// The app treats these rules as its own security baseline: a boot
+// re-adds a rule I'm missing and re-enables the limiter, even if the
+// dashboard disabled it. Removing the call — not the rules — is how I
+// would hand control back.
+func assertRateLimitSettings(app core.App) error {
+	s := app.Settings()
+
+	var missing []core.RateLimitRule
+	for _, want := range myRateLimitRules {
+		if !hasRateLimitRule(s.RateLimits.Rules, want.Label) {
+			missing = append(missing, want)
+		}
+	}
+	if s.RateLimits.Enabled && len(missing) == 0 {
+		return nil
+	}
+
+	s.RateLimits.Rules = append(missing, s.RateLimits.Rules...)
+	s.RateLimits.Enabled = true
+	if err := app.Save(s); err != nil {
+		return fmt.Errorf("failed to persist rate-limit settings: %w", err)
+	}
+	app.Logger().Info("enabled the rate limiter with my per-IP rules")
+	return nil
+}
+
+func hasRateLimitRule(rules []core.RateLimitRule, label string) bool {
+	for _, r := range rules {
+		if r.Label == label {
+			return true
+		}
+	}
+	return false
 }
