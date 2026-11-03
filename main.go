@@ -10,6 +10,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -52,6 +53,12 @@ func main() {
 		Id: "provisionFormCollections",
 		Func: func(be *core.BootstrapEvent) error {
 			if err := be.Next(); err != nil {
+				return err
+			}
+			// Security settings before anything else: my per-IP
+			// defenses are meaningless until client IPs resolve to the
+			// REAL client behind NPM.
+			if err := assertTrustedProxySettings(be.App); err != nil {
 				return err
 			}
 			// The order here is dependency-driven: users first (the forms
@@ -180,6 +187,13 @@ func main() {
 	// reach), and I must never expose 8090 publicly without NPM in front —
 	// the app speaks plain HTTP and trusts NPM's X-Forwarded-* headers
 	// for the client IP and scheme.
+	//
+	// Trust boundary: since I trust X-Forwarded-For (see
+	// assertTrustedProxySettings), 8090 must be reachable ONLY by NPM —
+	// anything else on the Proxmox bridge that can hit the port directly
+	// can pick its own client IP (log IP, and any per-IP defense). An
+	// nftables rule on the LXC restricting 8090 to 192.168.40.40 makes
+	// that honest.
 	if err := app.Start(); err != nil {
 		log.Fatal(err)
 	}
@@ -193,4 +207,33 @@ func publicDir() string {
 		return "./pb_public"
 	}
 	return filepath.Join(filepath.Dir(os.Args[0]), "pb_public")
+}
+
+// assertTrustedProxySettings makes my client-IP resolution work behind
+// Nginx Proxy Manager (audit #3). v0.40's TrustedProxy is a header LIST,
+// not an IP list: RequestEvent.RealIP() reads the named header(s) and
+// falls back to RemoteIP() when they're absent — so unset, EVERY request
+// reads as NPM's IP and every per-IP defense (rate limiting, login
+// throttling, log IP) collapses into one global bucket.
+//
+// NPM's nginx appends the real client to X-Forwarded-For, and I take the
+// RIGHTMOST entry (UseLeftmostIP stays false) — the leftmost is whatever
+// the client chose to send. This is only honest while 8090 is reachable
+// solely by NPM (see my deployment note above).
+//
+// I write only when the setting is absent, so a later dashboard edit
+// wins on subsequent boots. The save fires OnSettingsReload, which
+// resets PocketBase's rate-limiter store — exactly what I want when this
+// lands on an install that already has limiter state.
+func assertTrustedProxySettings(app core.App) error {
+	s := app.Settings()
+	if len(s.TrustedProxy.Headers) > 0 {
+		return nil
+	}
+	s.TrustedProxy.Headers = []string{"X-Forwarded-For"}
+	if err := app.Save(s); err != nil {
+		return fmt.Errorf("failed to persist trusted-proxy settings: %w", err)
+	}
+	app.Logger().Info("enabled X-Forwarded-For as the trusted client-IP header")
+	return nil
 }
