@@ -148,6 +148,12 @@ func handlePublicForm(e *core.RequestEvent) error {
 			// purpose — I don't want to leak which case the caller hit.
 			return e.UnauthorizedError("this form is password protected", nil)
 		}
+		// A legacy (sha256) entry that just verified gets upgraded to
+		// argon2id in place — once per form, on the first correct
+		// unlock after the upgrade.
+		if isLegacyAccessPasswordHash(form.GetString("access_password_hash")) {
+			upgradeLegacyAccessPassword(e.App, form, sent)
+		}
 	}
 
 	return e.JSON(http.StatusOK, map[string]any{
@@ -197,6 +203,11 @@ func handleSubmission(e *core.RequestEvent) error {
 			form.GetString("access_password_hash"),
 		) {
 			return e.UnauthorizedError("wrong access password", nil)
+		}
+		// Same in-place upgrade as the public fetch — a submission with
+		// the right legacy password migrates the form's hash.
+		if isLegacyAccessPasswordHash(form.GetString("access_password_hash")) {
+			upgradeLegacyAccessPassword(e.App, form, sent)
 		}
 	}
 
