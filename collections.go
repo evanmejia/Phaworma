@@ -38,6 +38,26 @@ func denyAllRules(c *core.Collection) {
 	c.DeleteRule = rule
 }
 
+// assertDenyAllRules is the boot-time twin of denyAllRules. The create path
+// sets my deny rule on every collection I provision, but a collection that
+// predates it (or was hand-edited in the dashboard) keeps whatever rule it
+// carries. An EMPTY rule is "public" in PocketBase — the one state I must
+// never find on these collections — and the other deviations (nil, a stale
+// looser string) don't match my intended state either, so I normalize all
+// five slots back to the deny rule. My /api/v1 endpoints do the real
+// authorization, so the native surface has to stay closed. I return whether
+// anything was corrected so my caller can skip a needless app.Save.
+func assertDenyAllRules(c *core.Collection) bool {
+	changed := false
+	for _, rule := range []*string{c.ListRule, c.ViewRule, c.CreateRule, c.UpdateRule, c.DeleteRule} {
+		if rule == nil || *rule != superuserOnlyRule {
+			*rule = superuserOnlyRule
+			changed = true
+		}
+	}
+	return changed
+}
+
 // dynamicCollectionName is the table backing a form's submissions.
 func dynamicCollectionName(formId string) string {
 	return dynPrefix + formId
@@ -154,13 +174,19 @@ func stampCreatedField(app core.App, c *core.Collection) error {
 func ensureFormsCollection(app core.App) error {
 	c, err := app.FindCachedCollectionByNameOrId(formsCollectionName)
 	if err == nil {
+		// Re-assert my deny rules first: a forms collection that predates
+		// them (or was hand-edited in the dashboard) must not stay open on
+		// the native REST API — my /api/v1 endpoints do the real
+		// authorization, so the native surface has to stay closed.
+		rulesChanged := assertDenyAllRules(c)
+
 		// Reconcile an existing collection. Both the FIELD declaration and
 		// the TABLE column must exist for each timestamp — an earlier
 		// version of my binary declared the fields without the columns ever
 		// being synced, so I check the table for each one.
 		needCreated := c.Fields.GetByName("created") == nil || !tableHasColumn(app, formsCollectionName, "created")
 		needUpdated := c.Fields.GetByName("updated") == nil || !tableHasColumn(app, formsCollectionName, "updated")
-		if !needCreated && !needUpdated {
+		if !rulesChanged && !needCreated && !needUpdated {
 			return nil
 		}
 
@@ -191,17 +217,24 @@ func ensureFormsCollection(app core.App) error {
 			c.Fields.Add(autodateField("updated", false, true))
 			changed = true
 		}
-		if changed {
-			// the field declarations are new -> persist them to the
-			// _collections table
+		if changed || rulesChanged {
+			// new field declarations and/or corrected rules -> persist
+			// them to the _collections table
 			if serr := app.Save(c); serr != nil {
 				return fmt.Errorf("failed to save %q collection: %w", formsCollectionName, serr)
 			}
 		}
-		if serr := app.SyncRecordTableSchema(c, &old); serr != nil {
-			return fmt.Errorf("failed to sync timestamp columns onto %q: %w", formsCollectionName, serr)
+		if needCreated || needUpdated {
+			// the timestamp columns themselves are missing -> sync the
+			// table (a rules-only change needs no table work)
+			if serr := app.SyncRecordTableSchema(c, &old); serr != nil {
+				return fmt.Errorf("failed to sync timestamp columns onto %q: %w", formsCollectionName, serr)
+			}
+			app.Logger().Info("synced timestamp fields onto the forms collection")
 		}
-		app.Logger().Info("synced timestamp fields onto the forms collection")
+		if rulesChanged {
+			app.Logger().Info("re-asserted deny rules on the forms collection")
+		}
 		return nil
 	}
 
@@ -209,7 +242,10 @@ func ensureFormsCollection(app core.App) error {
 
 	title := textField("title")
 	title.Required = true
-	title.Max = 200
+	// PocketBase enforces Max in RUNES (v0.40.6 field_text.go: "casted to
+	// []rune to count multi-byte chars as one"), so the cap IS the
+	// character promise — same unit as my title checks.
+	title.Max = formTitleMaxChars
 
 	shortCode := textField("short_code")
 	shortCode.Required = true
@@ -272,7 +308,12 @@ func buildDynamicCollection(form *core.Record) (*core.Collection, error) {
 		case questionTypeText:
 			f := textField(q.ID)
 			f.Required = q.Required
-			f.Max = 2000 // long-form answers allowed, runaway payloads capped
+			// PocketBase enforces Max in RUNES (v0.40.6 field_text.go:
+			// "casted to []rune to count multi-byte chars as one"), so
+			// this cap is my character promise itself — a 2000-character
+			// CJK answer passes, the 2001st is rejected in e.App.Save with
+			// a per-field validation error my SPA renders.
+			f.Max = textAnswerMaxChars
 			field = f
 		case questionTypeChoice, questionTypeDropdown:
 			f := selectField(q.ID, q.Options)
@@ -358,8 +399,18 @@ func ensureFormCollections(app core.App) error {
 
 		dynName := dynamicCollectionName(form.GetString("id"))
 		if dyn, cerr := app.FindCachedCollectionByNameOrId(dynName); cerr == nil {
-			// Table exists — but if it predates my AutodateField support it
-			// lacks the "created" column, so I stamp it in.
+			// Table exists. A collection that predates my deny rules (or
+			// was hand-edited) must not stay open on the native API —
+			// respondent data is the sensitive part — so I re-assert them,
+			// and if it predates my AutodateField support it also lacks the
+			// "created" column, so I stamp that in too.
+			if assertDenyAllRules(dyn) {
+				if serr := app.Save(dyn); serr != nil {
+					app.Logger().Warn("failed to re-assert rules on dynamic collection", "collection", dynName, "error", serr)
+				} else {
+					app.Logger().Info("re-asserted deny rules on dynamic collection", "collection", dynName)
+				}
+			}
 			if serr := stampCreatedField(app, dyn); serr != nil {
 				app.Logger().Warn("failed to add created field to dynamic collection", "collection", dynName, "error", serr)
 			}

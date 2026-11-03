@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pocketbase/dbx"
 	validation "github.com/pocketbase/ozzo-validation/v4"
@@ -226,8 +227,12 @@ func handleCreateForm(e *core.RequestEvent) error {
 		return e.BadRequestError("invalid request body", nil)
 	}
 
+	// Rune count on purpose — len() counts BYTES and would reject a valid
+	// 200-character multibyte title. The title column's Max is the same
+	// number in the same unit (PocketBase counts it in runes, see
+	// ensureFormsCollection), so handler and column agree.
 	req.Title = strings.TrimSpace(req.Title)
-	if req.Title == "" || len(req.Title) > 200 {
+	if req.Title == "" || utf8.RuneCountInString(req.Title) > formTitleMaxChars {
 		return e.BadRequestError("title must be 1-200 characters", nil)
 	}
 	if req.LifespanDays < 1 || req.LifespanDays > 30 {
@@ -465,8 +470,10 @@ func handleUpdateForm(e *core.RequestEvent) error {
 	}
 
 	if req.Title != nil {
+		// Rune count on purpose — same byte-vs-character reasoning as in
+		// handleCreateForm.
 		title := strings.TrimSpace(*req.Title)
-		if title == "" || len(title) > 200 {
+		if title == "" || utf8.RuneCountInString(title) > formTitleMaxChars {
 			return e.BadRequestError("title must be 1-200 characters", nil)
 		}
 		form.Set("title", title)

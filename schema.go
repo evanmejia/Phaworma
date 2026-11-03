@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // My question types. I keep "choice" (radio group) and "dropdown" (<select>)
@@ -30,6 +31,18 @@ const (
 // so a hostile (or buggy) payload can never inject SQL or break my field
 // mapping.
 var questionIdPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+
+// formTitleMaxChars and textAnswerMaxChars are my length promises in
+// CHARACTERS (runes), not bytes. My handlers enforce them in runes (see
+// validateSchema and my title checks), and the underlying columns carry
+// the same numbers as their Max — PocketBase counts Max in runes too
+// (v0.40.6 field_text.go: "casted to []rune to count multi-byte chars as
+// one"), so handler and column agree on one unit. See
+// ensureFormsCollection and buildDynamicCollection.
+const (
+	formTitleMaxChars  = 200
+	textAnswerMaxChars = 2000
+)
 
 // questionSpec is one question of my form schema. It mirrors the JS shape
 // in app.js exactly — same JSON, no translation layer.
@@ -67,7 +80,10 @@ func validateSchema(s formSchema) error {
 		}
 		seen[q.ID] = true
 
-		if q.Label == "" || len(q.Label) > 200 {
+		// Character (rune) count on purpose — len() counts BYTES, which
+		// would reject a perfectly valid 200-character CJK label (~600
+		// bytes) while the frontend maxlength is character-based.
+		if q.Label == "" || utf8.RuneCountInString(q.Label) > 200 {
 			return fmt.Errorf("question %d: label must be 1-200 characters", i+1)
 		}
 
@@ -87,7 +103,7 @@ func validateSchema(s formSchema) error {
 				if opt == "" {
 					return fmt.Errorf("question %d: empty option not allowed", i+1)
 				}
-				if len(opt) > 100 {
+				if utf8.RuneCountInString(opt) > 100 {
 					return fmt.Errorf("question %d: options must be 100 characters or less", i+1)
 				}
 				if optSeen[opt] {

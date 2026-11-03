@@ -35,6 +35,31 @@ const (
 	selfOnlyRule = "id = @request.auth.id"
 )
 
+// assertUsersRules re-asserts the exact rule set my SPA and my hooks expect
+// on an existing users collection: public signup (the empty create rule is
+// "public" in PocketBase — the state my signup depends on; a nil or
+// hand-edited rule would either break signup or open it to rules I don't
+// control) and self-only list/view/update/delete. A pre-existing
+// collection with looser rules would otherwise stay open on the NATIVE
+// REST API while my /api/v1 endpoints do their own authorization and never
+// notice — a public list rule alone would let anyone enumerate every
+// account email without auth. I return whether anything was corrected so my
+// caller can skip a needless app.Save.
+func assertUsersRules(c *core.Collection) bool {
+	changed := false
+	if c.CreateRule == nil || *c.CreateRule != "" {
+		c.CreateRule = types.Pointer("")
+		changed = true
+	}
+	for _, rule := range []*string{c.ListRule, c.ViewRule, c.UpdateRule, c.DeleteRule} {
+		if rule == nil || *rule != selfOnlyRule {
+			*rule = selfOnlyRule
+			changed = true
+		}
+	}
+	return changed
+}
+
 // --- provisioning ----------------------------------------------------------
 
 // ensureUsersCollection creates my `users` auth collection if it's missing
@@ -59,6 +84,9 @@ func ensureUsersCollection(app core.App) error {
 	name := textField("name")
 	name.Required = true
 	name.Min = 1
+	// PocketBase enforces Max in RUNES (v0.40.6 field_text.go: "casted to
+	// []rune to count multi-byte chars as one"), so 255 here is already
+	// 255 characters, multibyte included.
 	name.Max = 255
 
 	avatar := core.Fields[core.FieldTypeFile]().(*core.FileField)
@@ -98,10 +126,20 @@ func reconcileUsersCollection(app core.App, c *core.Collection) error {
 
 	changed := false
 
+	// Re-assert my rule set on every boot — a pre-existing (or
+	// hand-edited) collection must not keep foreign rules on the native
+	// API. See assertUsersRules for why.
+	if assertUsersRules(c) {
+		changed = true
+	}
+
 	// My co-creator list shows the invitee's name, so an empty name is
 	// not a state I want to support. If the field is missing I add it;
-	// if it's optional I tighten it.
-	if nameField, _ := c.Fields.GetByName("name").(*core.TextField); nameField == nil {
+	// if it's optional I tighten it. (No cap repair needed: PocketBase
+	// counts Max in runes, so an existing 255 cap is already 255
+	// characters.)
+	nameField, _ := c.Fields.GetByName("name").(*core.TextField)
+	if nameField == nil {
 		name := textField("name")
 		name.Required = true
 		name.Min = 1
@@ -141,8 +179,8 @@ func reconcileUsersCollection(app core.App, c *core.Collection) error {
 			c.Fields.Add(autodateField("updated", false, true))
 		}
 		if changed {
-			// persist the name-field tightening alongside the new
-			// field declarations
+			// persist the name-field tightening / corrected rules
+			// alongside the new field declarations
 			if serr := app.Save(c); serr != nil {
 				return fmt.Errorf("failed to save %q collection: %w", usersCollectionName, serr)
 			}
@@ -155,7 +193,7 @@ func reconcileUsersCollection(app core.App, c *core.Collection) error {
 		if serr := app.Save(c); serr != nil {
 			return fmt.Errorf("failed to save %q collection: %w", usersCollectionName, serr)
 		}
-		app.Logger().Info("tightened the users name field")
+		app.Logger().Info("saved the reconciled users collection (rules and/or name field)")
 	}
 	return nil
 }
@@ -227,7 +265,17 @@ func ensureFormsOwnerField(app core.App) error {
 // it's missing. The schema is stable (I introduced it in Stage 3 and
 // won't need to migrate it), so an existing collection is accepted as-is.
 func ensureCollaboratorsCollection(app core.App) error {
-	if _, err := app.FindCachedCollectionByNameOrId(collaboratorsCollectionName); err == nil {
+	if c, err := app.FindCachedCollectionByNameOrId(collaboratorsCollectionName); err == nil {
+		// The schema is stable, so an existing collection is accepted as-is
+		// EXCEPT for its rules: a pre-existing (or hand-edited) collection
+		// must not stay open on the native REST API — my /api/v1 endpoints
+		// do the real authorization, so the native surface stays closed.
+		if assertDenyAllRules(c) {
+			if serr := app.Save(c); serr != nil {
+				return fmt.Errorf("failed to save %q collection: %w", collaboratorsCollectionName, serr)
+			}
+			app.Logger().Info("re-asserted deny rules on the collaborators collection")
+		}
 		return nil
 	}
 

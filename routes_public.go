@@ -220,6 +220,13 @@ func handleSubmission(e *core.RequestEvent) error {
 		if field == nil || field.GetSystem() {
 			continue // unknown or system key — I drop it silently
 		}
+		// No answer-length pre-check of my own: my text columns carry a
+		// Max of textAnswerMaxChars, and PocketBase enforces Max in RUNES
+		// (verified in v0.40.6's field_text.go: "casted to []rune to
+		// count multi-byte chars as one") — the same unit as my
+		// character promise. An over-long answer therefore dies in
+		// e.App.Save below with a per-field validation error, which the
+		// block right there turns into the 400 shape my SPA renders.
 		record.Set(name, value)
 	}
 

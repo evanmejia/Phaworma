@@ -610,8 +610,9 @@ async function handleRespondentSubmit(e) {
       // under its question.
       const data = err.data?.data;
       if (data && typeof data === "object") {
-        for (const [qid, msgs] of Object.entries(data)) {
-          showQuestionError(qid, Array.isArray(msgs) ? msgs.join(" ") : String(msgs));
+        for (const [qid, item] of Object.entries(data)) {
+          const msg = validationMessage(item);
+          if (msg) showQuestionError(qid, msg);
         }
       }
       toast(err.message, "error");
@@ -1397,6 +1398,21 @@ function escapeHtml(value) {
 // goes into an attribute").
 const escapeAttr = escapeHtml;
 
+// PocketBase renders each field of a validation-error body as a single
+// {code, message} object (older shapes may carry strings or arrays of
+// them) — I normalize whatever arrives to the human message, so my
+// per-question error lines never show "[object Object]".
+function validationMessage(item) {
+  if (typeof item === "string") return item;
+  if (Array.isArray(item)) {
+    return item
+      .map((m) => (typeof m === "string" ? m : m?.message || ""))
+      .filter(Boolean)
+      .join(" ");
+  }
+  return item?.message || "";
+}
+
 function truncate(s, n) {
   s = String(s);
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
@@ -1466,10 +1482,12 @@ function initApp() {
     }
   });
 
-  // CREATE tab. I create against the users collection (public create
-  // rule) and the response is {token, record} — the SDK's create() does
-  // NOT save the token to my authStore (only auth* methods do), so I save
-  // it explicitly from the response.
+  // CREATE tab. I create the account against the users collection (public
+  // create rule), then log in through the same authWithPassword call my
+  // sign-in tab uses: in PocketBase v0.40.6 the create response carries NO
+  // token (just the record), and only the auth* methods save a session to
+  // my authStore — so create-then-login is the only way to end up signed
+  // in with a real token.
   document.getElementById("create-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = document.getElementById("create-name").value.trim();
@@ -1484,27 +1502,31 @@ function initApp() {
       return;
     }
     try {
-      const result = await pb.collection("users").create({
+      await pb.collection("users").create({
         name,
         email,
         password,
         passwordConfirm,
       });
-      // Explicit token save — see the comment above.
-      pb.authStore.save(result.token, result.record);
+      // authWithPassword saves the real token to my authStore itself —
+      // the create response above carries no token in v0.40.6.
+      await pb.collection("users").authWithPassword(email, password);
       closeAuthDialog();
       toast(`Account created — welcome, ${name}`, "success");
       runPendingAfterAuth();
     } catch (err) {
       // PocketBase field-validation failures arrive with a data map of
-      // {field: [messages]} — I render the first useful line.
+      // {field: {code, message}} — I render the first useful message.
       const fieldMsgs = err.data?.data;
       let msg = "Couldn't create the account.";
       if (fieldMsgs && typeof fieldMsgs === "object") {
-        const first = Object.values(fieldMsgs)[0];
-        if (Array.isArray(first) && first.length) msg = first[0];
-      } else if (err.status === 400 && err.data?.message === "Validation failed.") {
-        msg = "Check the highlighted fields and try again.";
+        for (const item of Object.values(fieldMsgs)) {
+          const text = validationMessage(item);
+          if (text) {
+            msg = text;
+            break;
+          }
+        }
       }
       errEl.textContent = msg;
       errEl.hidden = false;
