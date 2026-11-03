@@ -80,10 +80,14 @@ func validateSchema(s formSchema) error {
 		}
 		seen[q.ID] = true
 
+		// Trim before checking (audit #9): a spaces-only label is blank
+		// for every respondent, so it fails the same way an empty one
+		// does. (Options get the same trim a few lines below.)
+		label := strings.TrimSpace(q.Label)
 		// Character (rune) count on purpose — len() counts BYTES, which
 		// would reject a perfectly valid 200-character CJK label (~600
 		// bytes) while the frontend maxlength is character-based.
-		if q.Label == "" || utf8.RuneCountInString(q.Label) > 200 {
+		if label == "" || utf8.RuneCountInString(label) > 200 {
 			return fmt.Errorf("question %d: label must be 1-200 characters", i+1)
 		}
 

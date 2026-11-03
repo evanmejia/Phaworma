@@ -22,12 +22,18 @@ import (
 
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
+	"github.com/pocketbase/pocketbase/tools/dbutils"
 	"github.com/pocketbase/pocketbase/tools/types"
 )
 
 const (
 	usersCollectionName         = "users"
 	collaboratorsCollectionName = "collaborators"
+
+	// collaboratorsUniqueIndexName is the unique (form, email) index —
+	// one seat per address per form. It's part of the schema, not an
+	// optimization: my invite handler's 409 race backstop IS this index.
+	collaboratorsUniqueIndexName = "idx_collaborators_form_email"
 
 	// selfOnlyRule is the only rule shape my users collection needs beyond
 	// the public create: an account can list/view/update/delete itself and
@@ -266,16 +272,44 @@ func ensureFormsOwnerField(app core.App) error {
 // won't need to migrate it), so an existing collection is accepted as-is.
 func ensureCollaboratorsCollection(app core.App) error {
 	if c, err := app.FindCachedCollectionByNameOrId(collaboratorsCollectionName); err == nil {
-		// The schema is stable, so an existing collection is accepted as-is
-		// EXCEPT for its rules: a pre-existing (or hand-edited) collection
-		// must not stay open on the native REST API — my /api/v1 endpoints
-		// do the real authorization, so the native surface stays closed.
-		if assertDenyAllRules(c) {
-			if serr := app.Save(c); serr != nil {
-				return fmt.Errorf("failed to save %q collection: %w", collaboratorsCollectionName, serr)
-			}
-			app.Logger().Info("re-asserted deny rules on the collaborators collection")
+		// Snapshot the PRE-CHANGED collection: I mutate the cached object
+		// in place below, and app.Save's internal table sync diffs the
+		// cached object against ITSELF and would no-op — the same footgun
+		// my owner-field fix above works around, so an index fix needs an
+		// explicit sync against this snapshot.
+		var old core.Collection
+		oldJSON, merr := c.MarshalJSON()
+		if merr != nil {
+			return fmt.Errorf("failed to snapshot the %q collection: %w", collaboratorsCollectionName, merr)
 		}
+		if uerr := old.UnmarshalJSON(oldJSON); uerr != nil {
+			return fmt.Errorf("failed to restore %q snapshot: %w", collaboratorsCollectionName, uerr)
+		}
+
+		// The schema is otherwise stable, so an existing collection is
+		// accepted as-is EXCEPT for the two things my code depends on and
+		// can't detect any other way:
+		//   - its rules: a pre-existing (or hand-edited) collection must
+		//     not stay open on the native REST API — my /api/v1 endpoints
+		//     do the real authorization, so the native surface stays
+		//     closed;
+		//   - the unique (form, email) index (audit #10): a collection
+		//     minted by an older binary without it would let two racing
+		//     invites both succeed.
+		indexChanged := assertCollaboratorsUniqueIndex(c)
+		rulesChanged := assertDenyAllRules(c)
+		if !indexChanged && !rulesChanged {
+			return nil
+		}
+		if serr := app.Save(c); serr != nil {
+			return fmt.Errorf("failed to save %q collection: %w", collaboratorsCollectionName, serr)
+		}
+		if indexChanged {
+			if serr := app.SyncRecordTableSchema(c, &old); serr != nil {
+				return fmt.Errorf("failed to sync the %q unique index: %w", collaboratorsCollectionName, serr)
+			}
+		}
+		app.Logger().Info("re-asserted the collaborators collection's rules and unique index")
 		return nil
 	}
 
@@ -322,13 +356,45 @@ func ensureCollaboratorsCollection(app core.App) error {
 	c := core.NewBaseCollection(collaboratorsCollectionName)
 	c.Fields = core.NewFieldsList(formRef, userRef, email, status, created)
 	denyAllRules(c)
-	c.AddIndex("idx_collaborators_form_email", true, "form, email", "")
+	c.AddIndex(collaboratorsUniqueIndexName, true, "form, email", "")
 
 	if err := app.Save(c); err != nil {
 		return fmt.Errorf("failed to create the %q collection: %w", collaboratorsCollectionName, err)
 	}
 	app.Logger().Info("created the collaborators collection")
 	return nil
+}
+
+// assertCollaboratorsUniqueIndex re-asserts the unique (form, email) index
+// on a pre-existing collaborators collection (audit #10). The index is
+// part of my schema: without it, two racing invites both succeed, because
+// handleInviteCollaborator's 409 backstop is the index, not the code.
+// AddIndex replaces an index with the same name, so a downgraded or
+// hand-edited entry self-heals on the next boot.
+func assertCollaboratorsUniqueIndex(c *core.Collection) bool {
+	for _, raw := range c.Indexes {
+		idx := dbutils.ParseIndex(raw)
+		if strings.EqualFold(idx.IndexName, collaboratorsUniqueIndexName) &&
+			idx.Unique && indexColumnsAre(idx.Columns, "form", "email") {
+			return false
+		}
+	}
+	c.AddIndex(collaboratorsUniqueIndexName, true, "form, email", "")
+	return true
+}
+
+// indexColumnsAre answers whether a parsed index covers exactly these
+// columns, in this order.
+func indexColumnsAre(cols []dbutils.IndexColumn, want ...string) bool {
+	if len(cols) != len(want) {
+		return false
+	}
+	for i, col := range cols {
+		if !strings.EqualFold(strings.TrimSpace(col.Name), want[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // --- record hooks ------------------------------------------------------------

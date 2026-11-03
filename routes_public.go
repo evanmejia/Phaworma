@@ -169,6 +169,13 @@ type submissionBody struct {
 	Answers map[string]any `json:"answers"`
 }
 
+// maxSubmissionBodyBytes caps a respondent's JSON body (audit #6). My
+// largest legitimate submission — 50 answers × 2000 multi-byte chars —
+// stays well under 1 MiB, so a bigger POST can only be a mistake or an
+// attack, and Go's default (no cap) would happily buffer a multi-GB body
+// into memory on a PUBLIC, unauthenticated endpoint.
+const maxSubmissionBodyBytes = 1 << 20
+
 // handleSubmission turns a respondent's answers into a row in the form's
 // dynamic collection. The enforcement I apply here:
 //
@@ -211,8 +218,23 @@ func handleSubmission(e *core.RequestEvent) error {
 		}
 	}
 
+	// Cap the body BEFORE binding it (audit #6). MaxBytesReader is a
+	// wrapping reader, not a full-body read: it fails the first Read that
+	// would cross the limit, so a multi-GB POST is rejected after ~1 MiB
+	// of buffering, not after it's all in memory.
+	e.Request.Body = http.MaxBytesReader(e.Response, e.Request.Body, maxSubmissionBodyBytes)
+
 	var body submissionBody
 	if err := e.BindBody(&body); err != nil {
+		// Go 1.27's MaxBytesReader no longer answers 413 on my behalf
+		// (it only does for the stdlib's own response writer) — the
+		// crossed cap surfaces as *http.MaxBytesError, which the jsontext
+		// read error still unwraps to, so I translate it here.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return e.Error(http.StatusRequestEntityTooLarge,
+				"that submission is too large — try again with shorter answers", nil)
+		}
 		return e.BadRequestError("the request body must be JSON with an \"answers\" object", nil)
 	}
 

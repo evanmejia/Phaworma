@@ -509,7 +509,11 @@ func handleUpdateForm(e *core.RequestEvent) error {
 		return err
 	}
 
-	if _, err := requireFormAccess(e, form); err != nil {
+	// requireFormAccess returns the authenticated viewer — I use it here
+	// and below instead of re-looking it up with an ignored error
+	// (audit #11).
+	viewer, err := requireFormAccess(e, form)
+	if err != nil {
 		return err
 	}
 
@@ -567,7 +571,6 @@ func handleUpdateForm(e *core.RequestEvent) error {
 		return err
 	}
 
-	viewer, _ := currentCreator(e)
 	return e.JSON(http.StatusOK, formView(e.App, form, submissionCount(e.App, form), viewer.Id))
 }
 
@@ -668,7 +671,10 @@ func handleInviteCollaborator(e *core.RequestEvent) error {
 		}
 		return err
 	}
-	if _, err := requireFormOwner(e, form); err != nil {
+	// requireFormOwner returns the authenticated viewer (audit #11) — I
+	// need it a few lines down for the self-invite check.
+	viewer, err := requireFormOwner(e, form)
+	if err != nil {
 		return err
 	}
 
@@ -686,7 +692,6 @@ func handleInviteCollaborator(e *core.RequestEvent) error {
 
 	// Inviting yourself is a no-op worth refusing clearly — you already
 	// have every right this form can grant.
-	viewer, _ := currentCreator(e)
 	if email == strings.ToLower(viewer.GetString("email")) {
 		return e.BadRequestError("you are the owner of this form", nil)
 	}
@@ -741,22 +746,40 @@ func handleInviteCollaborator(e *core.RequestEvent) error {
 	}
 
 	if serr := e.App.Save(row); serr != nil {
-		// A malformed email that slipped past my pre-check arrives here
-		// as field validation errors — I answer 400 for those.
 		var verrs validation.Errors
 		if errors.As(serr, &verrs) {
+			// The unique (form, email) index is my backstop against two
+			// invites racing — and v0.40.6 normalizes a SQLite "unique
+			// constraint failed" into validation.Errors with code
+			// validation_not_unique, so the loser arrives HERE, not in
+			// the string-match I used to have (audit #10). A loser
+			// answers 409 like the check-then-insert path above.
+			if hasNotUniqueError(verrs) {
+				return e.Error(http.StatusConflict, "this email already has a seat on this form", nil)
+			}
+			// A malformed email that slipped past my pre-check arrives
+			// here as field validation errors — I answer 400 for those.
 			return e.BadRequestError("please enter a valid email address", verrs)
-		}
-		// The unique (form, email) index is my backstop against two
-		// invites racing — a loser answers 409 like the check above.
-		if strings.Contains(serr.Error(), "unique") {
-			return e.Error(http.StatusConflict, "this email already has a seat on this form", nil)
 		}
 		e.App.Logger().Error("failed to invite collaborator", "error", serr)
 		return e.InternalServerError("failed to invite this co-creator", nil)
 	}
 
 	return e.JSON(http.StatusCreated, collaboratorView(e.App, row))
+}
+
+// hasNotUniqueError answers whether a save failure was a unique-index
+// collision: v0.40.6's NormalizeUniqueIndexError rewrites SQLite's
+// "UNIQUE constraint failed" into validation.Errors whose entries carry
+// the code validation_not_unique — the typed check my race backstop now
+// relies on instead of substring-matching the error text.
+func hasNotUniqueError(verrs validation.Errors) bool {
+	for _, verr := range verrs {
+		if e, ok := verr.(validation.Error); ok && e.Code() == "validation_not_unique" {
+			return true
+		}
+	}
+	return false
 }
 
 // handleRemoveCollaborator is the owner's "revoke seat" action. Removing
@@ -862,9 +885,13 @@ func handleFormResults(e *core.RequestEvent) error {
 		}
 		return err
 	}
-	if _, err := requireFormAccess(e, form); err != nil {
+	viewer, err := requireFormAccess(e, form)
+	if err != nil {
 		return err
 	}
+	// The header count is the REAL total — a COUNT, not the row fetch
+	// below, which is capped at 1000 rows for the charts (audit #12).
+	total := submissionCount(e.App, form)
 
 	schema, err := parseSchema(form)
 	if err != nil {
@@ -914,9 +941,12 @@ func handleFormResults(e *core.RequestEvent) error {
 		}
 	}
 
-	viewer, _ := currentCreator(e)
+	// window = how many rows the charts actually aggregated (capped at
+	// 1000 by the fetch above) — my SPA says so whenever it's less than
+	// the total, so the charts never imply full coverage (audit #12).
 	return e.JSON(http.StatusOK, map[string]any{
-		"form":    formView(e.App, form, int64(len(records)), viewer.Id),
+		"form":    formView(e.App, form, total, viewer.Id),
 		"results": results,
+		"window":  len(records),
 	})
 }

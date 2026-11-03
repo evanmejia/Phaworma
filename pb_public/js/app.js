@@ -40,7 +40,6 @@ const state = {
   accessPassword: "",    // the password that unlocked the current form (resent on submit)
   forms: [],             // my cached creator form list
   currentFormId: null,   // the formId my builder/results/share views are on
-  isOwner: false,        // does the signed-in user OWN the current form?
 };
 
 // booted flips true after my first renderRoute — it keeps the auth-store
@@ -681,8 +680,16 @@ async function loadResults(formId) {
 
   // textContent, so no escaping needed — my browser handles it.
   document.getElementById("results-form-title").textContent = data.form.title;
+  // The header count is the real total; the charts only aggregate my
+  // server's window (newest 1000) — when those differ, say so
+  // (audit #12).
+  const windowNote =
+    data.window < data.form.submissionCount
+      ? ` · charts cover the latest ${data.window}`
+      : "";
   document.getElementById("results-form-sub").textContent =
     `${data.form.submissionCount} responses · ${expiryText(data.form)}` +
+    windowNote +
     (data.form.isOwner ? "" : ` · shared with you by ${data.form.ownerName || data.form.ownerEmail || "the owner"}`);
 
   renderCharts(data.results);
@@ -850,7 +857,6 @@ function clearDraft() {
 
 function startNewBuilder() {
   state.currentFormId = null;
-  state.isOwner = true; // a fresh draft is mine by definition
 
   // Restore my in-progress draft if I have one — guests expect their
   // work to survive a navigation, and signed-in users get the same.
@@ -877,7 +883,7 @@ function startNewBuilder() {
   document.getElementById("builder-readonly-note").hidden = true;
   document.getElementById("btn-add-question").hidden = false;
   document.getElementById("btn-builder-share").hidden = true;
-  document.getElementById("btn-builder-save").textContent = isSignedIn() ? "Publish form" : "Publish form";
+  document.getElementById("btn-builder-save").textContent = "Publish form";
   document.getElementById("builder-error").hidden = true;
   renderBuilderQuestions();
 }
@@ -910,7 +916,6 @@ async function loadBuilderForEdit(formId) {
   }));
   builderDraft.editing = true;
   builderDraft.formId = formId;
-  state.isOwner = data.form.isOwner;
 
   // Co-creators see a different heading — the same editor, a different
   // role. The schema is frozen for BOTH (see loadBuilderForEdit's
@@ -1278,7 +1283,6 @@ async function initShare() {
     return;
   }
 
-  state.isOwner = data.form.isOwner;
   if (!data.form.isOwner) {
     denied.hidden = false;
     body.hidden = true;
@@ -1428,7 +1432,9 @@ function fmtDate(iso) {
 // "expires in 3 days" / "expired" — my dashboard meta line.
 function expiryText(f) {
   if (f.status !== "active") return "expired";
-  const days = Math.ceil((new Date(f.expiresAt).getTime() - Date.now()) / 86400000);
+  // Floor, not ceil (audit #19): a form expiring in 3 hours is
+  // "expiring today", not "expires tomorrow".
+  const days = Math.floor((new Date(f.expiresAt).getTime() - Date.now()) / 86400000);
   if (days <= 0) return "expiring today";
   if (days === 1) return "expires tomorrow";
   return `expires in ${days} days`;
@@ -1476,8 +1482,14 @@ function initApp() {
       closeAuthDialog();
       toast(`Welcome back, ${pb.authStore.record?.name || email}`, "success");
       runPendingAfterAuth();
-    } catch {
-      errEl.textContent = "Wrong email or password.";
+    } catch (err) {
+      // A 400 is PocketBase saying the credentials are wrong; anything
+      // else (network down, timeout, 5xx) deserves an honest message
+      // instead of blaming the password (audit #20).
+      errEl.textContent =
+        err?.status === 400
+          ? "Wrong email or password."
+          : "Couldn't reach the server — check your connection and try again.";
       errEl.hidden = false;
     }
   });
