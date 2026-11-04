@@ -4,7 +4,7 @@
 /pb_data/
 
 # Compiled binary of my single-binary deployment.
-/forms-saas
+/phaworma
 
 # Go build artifacts in general.
 *.exe

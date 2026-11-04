@@ -1,4 +1,4 @@
-// Package main is my entrypoint for forms-saas — my self-hosted, ephemeral,
+// Package main is my entrypoint for Phaworma — my self-hosted, ephemeral,
 // privacy-first form builder (a lean Microsoft Forms alternative).
 //
 // I'm extending PocketBase as my application framework instead of bolting

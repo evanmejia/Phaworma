@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Forms — secure, ephemeral forms</title>
+  <title>Phaworma — secure, ephemeral forms</title>
   <meta name="description" content="Self-hosted, privacy-first form builder. Forms self-destruct after their chosen lifespan." />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%234f46e5'/%3E%3Cpath d='M26 34h48M26 52h48M26 70h30' stroke='white' stroke-width='9' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%2350251c'/%3E%3Cpath d='M34 74V26h20a15 15 0 0 1 0 30H34' fill='none' stroke='%23fff8ee' stroke-width='11' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="/css/app.css" />
 </head>
 <body>
@@ -16,12 +16,12 @@
        /forms/<id>, /forms/<id>/results, /forms/<id>/share. -->
   <div class="app-shell">
     <header class="app-header">
-      <a class="brand" href="/" aria-label="Forms — home">
+      <a class="brand" href="/" aria-label="Phaworma — home">
         <svg width="22" height="22" viewBox="0 0 100 100" aria-hidden="true">
           <rect width="100" height="100" rx="22" fill="currentColor" opacity="0.12"></rect>
           <path d="M26 34h48M26 52h48M26 70h30" stroke="currentColor" stroke-width="9" stroke-linecap="round"></path>
         </svg>
-        <span>Forms</span>
+        <span>Phaworma</span>
       </a>
       <nav class="app-nav" aria-label="Primary">
         <!-- "My forms" is a signed-in surface; app.js hides it for guests.
@@ -33,8 +33,8 @@
       </nav>
       <div class="auth-area">
         <span class="auth-user" id="auth-user" hidden></span>
-        <button type="button" class="btn btn-ghost btn-sm" id="btn-signin">Sign in</button>
-        <button type="button" class="btn btn-ghost btn-sm" id="btn-signout" hidden>Sign out</button>
+        <button type="button" class="btn btn-pill" id="btn-signin">Sign in</button>
+        <button type="button" class="btn btn-pill" id="btn-signout" hidden>Sign out</button>
       </div>
     </header>
 
@@ -44,10 +44,16 @@
            maps "/" to the dashboard view instead. -->
       <section class="view" data-view="home" hidden aria-labelledby="home-title">
         <div class="hero">
-          <h1 id="home-title">Forms that disappear.</h1>
-          <p class="view-sub hero-sub">Build a form, share a clean link, and let every response self-destruct when the form's lifespan ends. No tracking, no permanent footprint — and no account needed to start.</p>
-          <button type="button" class="btn btn-primary btn-lg" id="btn-home-start">Create a form</button>
-          <p class="hero-note">Publishing asks for a free account — that's where your form and its results live.</p>
+          <div class="hero-copy">
+            <h1 id="home-title">Forms that disappear.</h1>
+            <p class="view-sub hero-sub">Build a form, share a clean link, and let every response self-destruct when the form's lifespan ends. No tracking, no permanent footprint — and no account needed to start.</p>
+            <button type="button" class="btn btn-primary btn-lg" id="btn-home-start">Create a form</button>
+            <p class="hero-note">Publishing asks for a free account — that's where your form and its results live.</p>
+          </div>
+          <!-- My shawarma mascot (wave pose) — decorative, so hidden from
+               screen readers. It bobs gently on wide screens and is
+               hidden below the 900px breakpoint. -->
+          <img class="hero-art" src="/img/shawarma-wave.svg" alt="" aria-hidden="true" width="220" height="270" />
         </div>
         <div class="hero-grid">
           <div class="card hero-card">

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// app.js — my Stage 3 frontend for forms-saas.
+// app.js — my Stage 3 frontend for Phaworma.
 //
 // I wrote this as a plain ES module with no framework and no build step: the
 // entire frontend is inspectable in one file, and my only runtime dependency

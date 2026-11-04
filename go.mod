@@ -1,4 +1,4 @@
-module forms-saas
+module phaworma
 
 go 1.27
 

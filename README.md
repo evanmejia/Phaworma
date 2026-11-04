@@ -1,4 +1,4 @@
-# forms-saas
+# Phaworma
 
 My self-hosted, ephemeral, privacy-first form builder — a lean Microsoft
 Forms alternative that runs as a single Go binary (PocketBase extended as an
@@ -29,13 +29,13 @@ handles it.
 
 ```bash
 # 1. build
-go build -o forms-saas .
+go build -o phaworma .
 
 # 2. create my superuser (first run; creates pb_data/)
-./forms-saas superuser upsert admin@forms.evanmejia.com 'change-me-please'
+./phaworma superuser upsert admin@forms.evanmejia.com 'change-me-please'
 
 # 3. serve
-./forms-saas serve --http 0.0.0.0:8090
+./phaworma serve --http 0.0.0.0:8090
 ```
 
 Then open:
@@ -102,21 +102,21 @@ a safety net for crashes between ticks.
 1. Build on the LXC (or cross-compile) and copy the binary next to
    `pb_public/` — the binary looks for `pb_public/` next to itself.
 2. Create the superuser:
-   `./forms-saas superuser upsert admin@forms.evanmejia.com '<strong-password>'`
+   `./phaworma superuser upsert admin@forms.evanmejia.com '<strong-password>'`
 3. Run it under systemd (below).
 
 ### systemd unit
 
 ```ini
 [Unit]
-Description=forms-saas (PocketBase app)
+Description=Phaworma (PocketBase app)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 User=forms
 WorkingDirectory=/opt/forms
-ExecStart=/opt/forms/forms-saas serve --http 0.0.0.0:8090
+ExecStart=/opt/forms/phaworma serve --http 0.0.0.0:8090
 Restart=on-failure
 # I run as a dedicated unprivileged user; /opt/forms (and the pb_data dir
 # inside it) must be owned by that user.
